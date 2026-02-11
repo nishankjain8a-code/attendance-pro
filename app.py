@@ -46,15 +46,27 @@ def get_sheet():
     return sh.worksheet(SHEET_NAME)
 
 def read_leaderboard():
+    cols = ["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"]
     try:
         ws = get_sheet()
         header = ws.row_values(1)
-        if header and "student_name" not in header:
-            ws.update("A1:G1", [["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"]])
-        return pd.DataFrame(ws.get_all_records())
+        if not header or "student_name" not in header:
+            ws.update("A1:G1", [cols])
+        
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
+        
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+            
+        # Ensure all columns exist even if some are missing in the data
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None
+        return df
     except Exception as e:
         st.error(f"⚠️ Leaderboard Error: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=cols)
 
 def append_leaderboard(row):
     try:
