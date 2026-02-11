@@ -1,7 +1,6 @@
-streamlit
+streamlit>=1.30
 pandas
 gspread
 google-auth
 reportlab
-matplotlib
-pyplot 
+Matplotlib
