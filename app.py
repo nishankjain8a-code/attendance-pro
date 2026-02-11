@@ -185,8 +185,16 @@ with tabs[1]:
 
 # ===== TAB 3: Leaderboard + Admin =====
 with tabs[2]:
+    def safe_sort(df, cols, asc=None):
+    cols = [c for c in cols if c in df.columns]
+    if not cols:
+        return df
+    if asc is None:
+        asc = [False]*len(cols)
+    return df.sort_values(by=cols, ascending=asc)
+
     lb_df=read_leaderboard()
-    st.dataframe(lb_df.sort_values(by=["overall_pct","safe_bunks"],ascending=[False,True]).head(10))
+    
     if st.button("Submit to Leaderboard"):
         if "overall" in st.session_state and "df" in st.session_state and student_name.strip():
             bunks=sum(safe_bunks(int(r["Present"]),int(r["Total"]),MIN_PERCENT) for _,r in st.session_state.df.iterrows())
@@ -213,7 +221,9 @@ with tabs[3]:
         if name_q.strip():
             me=lb_df[lb_df["student_name"].astype(str).str.lower()==name_q.strip().lower()]
             if not me.empty:
-                st.dataframe(me.sort_values("timestamp", ascending=False), use_container_width=True)
+                lb_df = safe_sort(lb_df, ["overall_pct","safe_bunks"], [False, True])
+                st.dataframe(lb_df, use_container_width=True)
+
             else:
                 st.info("No records found for this name.")
         
@@ -277,24 +287,25 @@ with tabs[7]:
 
 # ===== TAB 9: Heatmap (REALISTIC from leaderboard) =====
 with tabs[8]:
-    lb_df=read_leaderboard()
-    if len(lb_df):
-        # simulate realistic pattern from submission times (hour)
-        lb_df["hour"] = pd.to_datetime(lb_df["timestamp"], errors="coerce").dt.hour
-        lb_df["day"] = pd.to_datetime(lb_df["timestamp"], errors="coerce").dt.dayofweek
-        heat = np.zeros((6,2), dtype=int)
-        for _,r in lb_df.dropna(subset=["hour","day"]).iterrows():
-            day = int(min(r["day"],5))
-            col = 0 if r["hour"] < 13 else 1
-            heat[day][col] += 1
-        fig,ax=plt.subplots()
-        ax.imshow(heat, cmap="RdYlGn_r")
-        ax.set_xticks([0,1]); ax.set_xticklabels(["Morning","Afternoon"])
-        ax.set_yticks(range(6)); ax.set_yticklabels(["Mon","Tue","Wed","Thu","Fri","Sat"])
-        st.pyplot(fig)
-        st.caption("Based on real submission timestamps (proxy for class time).")
-    else:
-        st.info("Not enough data for heatmap.")
+    def read_leaderboard():
+    try:
+        ws = get_sheet()
+        rows = ws.get_all_records()
+        df = pd.DataFrame(rows)
+
+        # Normalize headers
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        # Ensure required columns exist
+        for col in ["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"]:
+            if col not in df.columns:
+                df[col] = None
+
+        return df
+    except Exception as e:
+        st.warning(f"⚠️ Could not read leaderboard: {e}")
+        return pd.DataFrame(columns=["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"])
+
 
 # ===== TAB 10: Share Card =====
 with tabs[9]:
@@ -305,3 +316,4 @@ with tabs[9]:
         st.download_button("⬇️ Download Share Card", buf.getvalue(), "attendance_card.png", "image/png")
     else:
         st.info("Run analysis first.")
+
