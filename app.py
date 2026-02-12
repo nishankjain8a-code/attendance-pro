@@ -45,24 +45,37 @@ def get_sheet():
     sh = client.open_by_key(SHEET_ID)
     return sh.worksheet(SHEET_NAME)
 
+@st.cache_data(ttl=60)
 def read_leaderboard():
     cols = ["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"]
     try:
         ws = get_sheet()
-        header = ws.row_values(1)
-        if not header or "student_name" not in header:
+        # Reduce API calls by getting all values at once
+        all_values = ws.get_all_values()
+        if not all_values:
             ws.update("A1:G1", [cols])
+            return pd.DataFrame(columns=cols)
         
-        data = ws.get_all_records()
-        df = pd.DataFrame(data)
+        header = all_values[0]
+        if "student_name" not in header:
+            ws.update("A1:G1", [cols])
+            return pd.DataFrame(columns=cols)
+            
+        data = all_values[1:]
+        df = pd.DataFrame(data, columns=header)
         
         if df.empty:
             return pd.DataFrame(columns=cols)
             
-        # Ensure all columns exist even if some are missing in the data
+        # Ensure all columns exist and types are correct
         for c in cols:
             if c not in df.columns:
                 df[c] = None
+        
+        # Numeric conversion for sorting
+        df["overall_pct"] = pd.to_numeric(df["overall_pct"], errors="coerce")
+        df["safe_bunks"] = pd.to_numeric(df["safe_bunks"], errors="coerce")
+        
         return df
     except Exception as e:
         st.error(f"⚠️ Leaderboard Error: {e}")
@@ -73,6 +86,7 @@ def append_leaderboard(row):
         ws = get_sheet()
         ws.append_row([row["nickname"], row["student_name"], row["section"], row["overall_pct"],
                        row["safe_bunks"], row["timestamp"], row["week_id"]])
+        st.cache_data.clear() # Clear cache on new submission
         return True
     except Exception as e:
         st.error(f"❌ Submission Error: {e}")
@@ -83,6 +97,7 @@ def clear_leaderboard():
         ws = get_sheet()
         ws.clear()
         ws.append_row(["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"])
+        st.cache_data.clear() # Clear cache on reset
         return True
     except Exception as e:
         st.error(f"❌ Reset Error: {e}")
