@@ -1,322 +1,199 @@
 import streamlit as st
 import pandas as pd
-import math, random, os, io
-import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime, date
-import gspread
-from google.oauth2.service_account import Credentials
-from PIL import Image, ImageDraw
+import os, json
 
-st.set_page_config(page_title="Attendance Pro Ultimate", layout="centered")
+st.set_page_config(page_title="Attendance Bunk Simulator", layout="centered")
 
-# ===== CONFIG =====
-def get_config(key, default):
-    if "app_config" in st.secrets and key in st.secrets["app_config"]:
-        return st.secrets["app_config"][key]
-    return default
+# ========== AUTO SAVE (LOCAL FILE) ==========
+AUTO_SAVE_FILE = "user_timetable.json"
 
-ADMIN_CODE = get_config("admin_code", "1234")
-SHEET_ID = get_config("sheet_id", "1hjP2VZYQJT3nfo6X0s7-p7Wr5Zlvwk7SroSBLTx1gfc")
-SHEET_NAME = get_config("sheet_name", "Sheet1")
-LOCAL_JSON_KEY = "stunning-shadow-480614-r3-e600fa51e8c1.json"
+def save_user_data(data):
+    with open(AUTO_SAVE_FILE, "w") as f:
+        json.dump(data, f)
 
-SUBJECTS = [
-    ("Engineering Physics", "TH", 2), ("Engineering Physics", "PR", 1),
-    ("Engineering Graphics", "TH", 3), ("Engineering Graphics", "PR", 1),
-    ("Foundations of Programming", "TH", 3), ("Foundations of Programming", "PR", 2),
-    ("Discrete Mathematics with Graph Theory", "TH", 3),
-    ("Foundations of Computer Architecture and System Design", "TH", 3),
-    ("Foundations of Computer Architecture and System Design", "PJ", 1),
-    ("Yoga - II", "PR", 1), ("Foundations of Peace", "TH", 2),
-]
+def load_user_data():
+    if os.path.exists(AUTO_SAVE_FILE):
+        with open(AUTO_SAVE_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-# ===== GOOGLE SHEETS =====
-def get_gsheet_client():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
-    if os.path.exists(LOCAL_JSON_KEY):
-        creds = Credentials.from_service_account_file(LOCAL_JSON_KEY, scopes=scopes)
-    else:
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    return gspread.authorize(creds)
+# ========== UI ==========
+st.title("📅 Attendance Bunk Simulator")
 
-def get_sheet():
-    client = get_gsheet_client()
-    sh = client.open_by_key(SHEET_ID)
-    return sh.worksheet(SHEET_NAME)
+MIN_PERCENT = st.number_input("Minimum required %", 50, 100, 75, 1)
 
-@st.cache_data(ttl=60)
-def read_leaderboard():
-    cols = ["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"]
-    try:
-        ws = get_sheet()
-        # Reduce API calls by getting all values at once
-        all_values = ws.get_all_values()
-        if not all_values:
-            ws.update("A1:G1", [cols])
-            return pd.DataFrame(columns=cols)
-        
-        header = all_values[0]
-        if "student_name" not in header:
-            ws.update("A1:G1", [cols])
-            return pd.DataFrame(columns=cols)
-            
-        data = all_values[1:]
-        df = pd.DataFrame(data, columns=header)
-        
-        if df.empty:
-            return pd.DataFrame(columns=cols)
-            
-        # Ensure all columns exist and types are correct
-        for c in cols:
-            if c not in df.columns:
-                df[c] = None
-        
-        # Numeric conversion for sorting
-        df["overall_pct"] = pd.to_numeric(df["overall_pct"], errors="coerce")
-        df["safe_bunks"] = pd.to_numeric(df["safe_bunks"], errors="coerce")
-        
-        return df
-    except Exception as e:
-        st.error(f"⚠️ Leaderboard Error: {e}")
-        return pd.DataFrame(columns=cols)
+# Tabs
+tabs = st.tabs(["📊 Calculator", "📅 Bunk Simulator"])
 
-def append_leaderboard(row):
-    try:
-        ws = get_sheet()
-        ws.append_row([row["nickname"], row["student_name"], row["section"], row["overall_pct"],
-                       row["safe_bunks"], row["timestamp"], row["week_id"]])
-        st.cache_data.clear() # Clear cache on new submission
-        return True
-    except Exception as e:
-        st.error(f"❌ Submission Error: {e}")
-        return False
-
-def clear_leaderboard():
-    try:
-        ws = get_sheet()
-        ws.clear()
-        ws.append_row(["nickname","student_name","section","overall_pct","safe_bunks","timestamp","week_id"])
-        st.cache_data.clear() # Clear cache on reset
-        return True
-    except Exception as e:
-        st.error(f"❌ Reset Error: {e}")
-        return False
-
-# ===== AUTO-RESET =====
-def check_weekly_reset():
-    cur_week = date.today().isocalendar().week
-    meta_path = "meta.csv"
-    last_week = 0
-    if os.path.exists(meta_path):
-        try:
-            mdf = pd.read_csv(meta_path)
-            last_week = int(mdf.iloc[0]["last_reset_week"])
-        except: pass
-    if cur_week > last_week:
-        if clear_leaderboard():
-            pd.DataFrame([{"last_reset_week": cur_week}]).to_csv(meta_path, index=False)
-            return True
-    return False
-
-# ===== HELPERS =====
-def pct(p, t): return round((p/t)*100, 2) if t > 0 else 0.0
-def safe_bunks(p, t, minp): return max(0, int((p * 100 / minp) - t)) if t > 0 else 0
-def simulate_weeks(p,t,w,weeks=2,attend_all=False):
-    add=w*weeks; return pct(p+add if attend_all else p, t+add)
-def guru(cur, sim, minp, typ):
-    msg="🔥 Chill hai" if cur>=minp+8 else "🙂 Borderline" if cur>=minp else "🚨 Danger"
-    if sim<minp: msg+=" ❌ Bunk mat kar"
-    if typ in ["PR","PJ"]: msg+=" 🧪 Practical strict"
-    return msg
-def risk_meter(cur,minp):
-    return ("🟢 SAFE",1.0) if cur>=minp+8 else ("🟡 BORDERLINE",0.6) if cur>=minp else ("🔴 DANGER",0.2)
-def end_sem_predictor(p,t,w,weeks_left=6):
-    ft=t+w*weeks_left; fp=p+w*weeks_left; return (fp/ft*100) if ft else 0
-def bunk_budget(p,t,minp): return max(0,int((p/(minp/100))-t)) if t else 0
-def xp_and_level(streak): xp=streak*10; return xp, min(10, xp//50+1)
-def badges(overall,bunks,streak):
-    out=[]
-    if overall>=90: out.append("🥇 No Bunk King")
-    if overall>=80 and streak>=5: out.append("🧠 Comeback Kid")
-    if bunks==0: out.append("💤 Serial Bunker")
-    return out
-
-# ===== UI SETUP =====
-st.title("✨ Attendance Pro — Ultimate")
-
-# Restore Premium Styling
-st.markdown("""
-    <style>
-    .stMetric { background: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 10px; border-left: 5px solid #00d4ff; }
-    .stExpander { border-radius: 10px !important; border: 1px solid rgba(255, 255, 255, 0.1) !important; }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { 
-        background-color: rgba(255, 255, 255, 0.05); 
-        border-radius: 5px 5px 0 0; 
-        padding: 5px 15px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-if check_weekly_reset():
-    st.toast("📅 New week detected! Leaderboard has been reset.", icon="🌞")
-MIN_PERCENT = st.number_input("Minimum required %", 50, 100, 80, 1)
-
-if "nickname" not in st.session_state:
-    st.session_state.nickname = f"User{random.randint(100,999)}"
-
-student_name = st.text_input("👤 Your Name")
-section = st.selectbox("Section", ["Div 1","Div 2","Div 3","Div 10","Other"])
-
-tabs = st.tabs([
-    "📊 Calculator", "🤖 AI Guru", "🏆 Leaderboard + Admin", "📜 History + 👥 Compare",
-    "🚦 Risk Meter", "🔮 End-Sem Predictor", "💸 Bunk Budget",
-    "🎮 Streak + 🏅 Badges", "🔥 Heatmap", "📸 Share Card"
-])
-
-# ===== TAB 1: Calculator =====
+# ---------- TAB 1: Simple Calculator (Optional) ----------
 with tabs[0]:
-    rows=[]
-    for i,(name,typ,w) in enumerate(SUBJECTS):
-        with st.expander(f"{name} ({typ})"):
-            p=st.number_input("Present",0,step=1,key=f"p{i}")
-            t=st.number_input("Total",0,step=1,key=f"t{i}")
-            rows.append((name,typ,p,t,w,pct(p,t)))
-    if st.button("Analyze"):
-        df=pd.DataFrame(rows,columns=["Subject","Type","Present","Total","PerWeek","%"])
-        st.session_state.df=df
-        st.session_state.overall=round(df["%"].mean(),2) if len(df) else 0
-        st.success("Analysis done!")
+    st.info("This tab is optional. Use 📅 Bunk Simulator for full features.")
+    p = st.number_input("Present", 0, step=1)
+    t = st.number_input("Total", 0, step=1)
+    if st.button("Calculate %"):
+        pct = round((p/t)*100, 2) if t else 0
+        st.metric("Attendance %", f"{pct}%")
 
-# ===== TAB 2: AI Guru =====
+# ---------- Load saved data at start ----------
+saved = load_user_data()
+if saved:
+    st.session_state.user_subjects = saved.get("subjects", [])
+    st.session_state.user_lectures = saved.get("lectures", {})
+    st.session_state.user_attendance = saved.get("attendance", {})
+
+# ---------- TAB 2: Bunk Simulator ----------
 with tabs[1]:
-    if "df" in st.session_state:
-        for _,r in st.session_state.df.iterrows():
-            sim_bunk=simulate_weeks(int(r["Present"]),int(r["Total"]),int(r["PerWeek"]),2,False)
-            st.info(f"{r['Subject']}: {guru(r['%'], sim_bunk, MIN_PERCENT, r['Type'])}")
-    else:
-        st.info("Run analysis first.")
+    st.header("📅 Bunk Simulator — Apna Timetable + Attendance (Auto-Save)")
 
-# ===== TAB 3: Leaderboard + Admin =====
-with tabs[2]:
-    lb_df=read_leaderboard()
-    st.dataframe(lb_df.sort_values(by=["overall_pct","safe_bunks"],ascending=[False,True]).head(10))
-    if st.button("Submit to Leaderboard"):
-        if "overall" in st.session_state and "df" in st.session_state and student_name.strip():
-            bunks=sum(safe_bunks(int(r["Present"]),int(r["Total"]),MIN_PERCENT) for _,r in st.session_state.df.iterrows())
-            res = append_leaderboard({
-                "nickname": st.session_state.nickname,
-                "student_name": student_name.strip(),
-                "section": section,
-                "overall_pct": st.session_state.overall,
-                "safe_bunks": bunks,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "week_id": date.today().isocalendar().week
-            })
-            if res: st.success("🚀 Score submitted successfully!")
-        else:
-            st.warning("⚠️ Please run analysis and enter your name first!")
-    if st.text_input("Admin Code", type="password")==ADMIN_CODE:
-        if st.button("Reset leaderboard"): clear_leaderboard()
+    default_subjects = ", ".join(st.session_state.get("user_subjects", []))
+    default_lectures = ", ".join(str(v) for v in st.session_state.get("user_lectures", {}).values())
 
-# ===== TAB 4: History + Compare =====
-with tabs[3]:
-    lb_df=read_leaderboard()
-    if not lb_df.empty:
-        name_q=st.text_input("🔍 Search your history by Name")
-        if name_q.strip():
-            me=lb_df[lb_df["student_name"].astype(str).str.lower()==name_q.strip().lower()]
-            if not me.empty:
-                st.dataframe(me.sort_values("timestamp", ascending=False), use_container_width=True)
+    st.subheader("📚 Subjects (comma separated)")
+    subjects_input = st.text_area(
+        "Example: Physics, EG, FOP, Maths",
+        value=default_subjects,
+        placeholder="Physics, EG, FOP"
+    )
+
+    st.subheader("🗓️ Kal ka Timetable (har subject ke lectures)")
+    lectures_input = st.text_area(
+        "Example: 2, 1, 1",
+        value=default_lectures,
+        placeholder="2,1,1"
+    )
+
+    cA, cB = st.columns(2)
+    with cA:
+        if st.button("💾 Save Subjects + Timetable"):
+            try:
+                subjects = [s.strip() for s in subjects_input.split(",") if s.strip()]
+                lectures = [int(x.strip()) for x in lectures_input.split(",") if x.strip()]
+
+                if len(subjects) != len(lectures):
+                    st.error("❌ Subjects aur lectures ki count match nahi ho rahi")
+                else:
+                    st.session_state.user_subjects = subjects
+                    st.session_state.user_lectures = dict(zip(subjects, lectures))
+
+                    save_user_data({
+                        "subjects": st.session_state.user_subjects,
+                        "lectures": st.session_state.user_lectures,
+                        "attendance": st.session_state.get("user_attendance", {})
+                    })
+                    st.success("✅ Subjects + timetable auto-saved!")
+            except:
+                st.error("❌ Galat format. Example: Physics, EG | 2,1")
+
+    with cB:
+        if st.button("🔁 Refresh from saved"):
+            saved = load_user_data()
+            if saved:
+                st.session_state.user_subjects = saved.get("subjects", [])
+                st.session_state.user_lectures = saved.get("lectures", {})
+                st.session_state.user_attendance = saved.get("attendance", {})
+                st.success("🔄 Saved data reload ho gaya!")
             else:
-                st.info("No records found for this name.")
-        
-        if len(lb_df["nickname"].unique()) >= 2:
-            st.divider()
-            st.subheader("👥 Compare with Friends")
-            users=lb_df["nickname"].unique().tolist()
+                st.info("ℹ️ Koi saved data nahi mila.")
+
+    if "user_subjects" in st.session_state and st.session_state.user_subjects:
+        st.subheader("📊 Apni Current Attendance")
+
+        attendance = {}
+        for sub in st.session_state.user_subjects:
             c1, c2 = st.columns(2)
-            u1=c1.selectbox("You",users, index=0)
-            u2=c2.selectbox("Friend",users, index=min(1, len(users)-1))
-            
-            d1=lb_df[lb_df["nickname"]==u1].tail(10)
-            d2=lb_df[lb_df["nickname"]==u2].tail(10)
-            
-            fig,ax=plt.subplots(figsize=(8,4))
-            fig.patch.set_facecolor('#0e1117')
-            ax.set_facecolor('#0e1117')
-            ax.plot(d1["overall_pct"].tolist(), marker="o", label=u1, color="#00d4ff")
-            ax.plot(d2["overall_pct"].tolist(), marker="o", label=u2, color="#ff4b4b")
-            ax.set_title("Attendance Trend", color="white")
-            ax.tick_params(colors='white')
-            ax.legend()
-            st.pyplot(fig)
-    else:
-        st.info("Leaderboard is currently empty.")
+            with c1:
+                p = st.number_input(
+                    f"{sub} - Present",
+                    0, step=1,
+                    value=int(st.session_state.get("user_attendance", {}).get(sub, [0, 0])[0]),
+                    key=f"p_{sub}"
+                )
+            with c2:
+                t = st.number_input(
+                    f"{sub} - Total",
+                    0, step=1,
+                    value=int(st.session_state.get("user_attendance", {}).get(sub, [0, 0])[1]),
+                    key=f"t_{sub}"
+                )
+            attendance[sub] = (p, t)
 
-# ===== TAB 5: Risk Meter =====
-with tabs[4]:
-    if "overall" in st.session_state:
-        label,prog=risk_meter(st.session_state.overall, MIN_PERCENT)
-        st.progress(prog); st.write(label)
-    else:
-        st.info("Run analysis first.")
+        # Auto-save attendance
+        st.session_state.user_attendance = attendance
+        save_user_data({
+            "subjects": st.session_state.user_subjects,
+            "lectures": st.session_state.user_lectures,
+            "attendance": st.session_state.user_attendance
+        })
 
-# ===== TAB 6: End-Sem Predictor =====
-with tabs[5]:
-    if "df" in st.session_state:
-        pred=end_sem_predictor(int(st.session_state.df["Present"].sum()),
-                               int(st.session_state.df["Total"].sum()),
-                               int(st.session_state.df["PerWeek"].sum()))
-        st.metric("Predicted End-Sem %", f"{pred:.2f}%")
-    else:
-        st.info("Run analysis first.")
+        st.subheader("📉 Kal bunk karoge toh kya hoga? (Total bunk)")
+        bunk_total = st.number_input("Kal total kitne lecture bunk karoge?", 0, 10, 1)
 
-# ===== TAB 7: Bunk Budget =====
-with tabs[6]:
-    if "df" in st.session_state:
-        bunks=sum(safe_bunks(int(r["Present"]),int(r["Total"]),MIN_PERCENT) for _,r in st.session_state.df.iterrows())
-        st.success(f"🎟️ Safe bunks: {bunks}")
-    else:
-        st.info("Run analysis first.")
+        if st.button("🔮 Simulate Total Bunk"):
+            sim_rows = []
+            remaining = bunk_total
 
-# ===== TAB 8: Streak + Badges =====
-with tabs[7]:
-    streak=random.randint(1,7)
-    xp,lvl=xp_and_level(streak)
-    st.metric("🔥 Streak", streak); st.metric("⭐ XP", xp); st.metric("🏆 Level", lvl)
-    if "overall" in st.session_state:
-        bunks=sum(safe_bunks(int(r["Present"]),int(r["Total"]),MIN_PERCENT) for _,r in st.session_state.df.iterrows())
-        for b in badges(st.session_state.overall,bunks,streak): st.success(b)
+            for sub in st.session_state.user_subjects:
+                lec = int(st.session_state.user_lectures.get(sub, 0))
+                p, t = attendance.get(sub, (0, 0))
 
-# ===== TAB 9: Heatmap (REALISTIC from leaderboard) =====
-with tabs[8]:
-    lb_df=read_leaderboard()
-    if len(lb_df):
-        # simulate realistic pattern from submission times (hour)
-        lb_df["hour"] = pd.to_datetime(lb_df["timestamp"], errors="coerce").dt.hour
-        lb_df["day"] = pd.to_datetime(lb_df["timestamp"], errors="coerce").dt.dayofweek
-        heat = np.zeros((6,2), dtype=int)
-        for _,r in lb_df.dropna(subset=["hour","day"]).iterrows():
-            day = int(min(r["day"],5))
-            col = 0 if r["hour"] < 13 else 1
-            heat[day][col] += 1
-        fig,ax=plt.subplots()
-        ax.imshow(heat, cmap="RdYlGn_r")
-        ax.set_xticks([0,1]); ax.set_xticklabels(["Morning","Afternoon"])
-        ax.set_yticks(range(6)); ax.set_yticklabels(["Mon","Tue","Wed","Thu","Fri","Sat"])
-        st.pyplot(fig)
-        st.caption("Based on real submission timestamps (proxy for class time).")
-    else:
-        st.info("Not enough data for heatmap.")
+                bunk_here = min(lec, remaining)
+                remaining -= bunk_here
 
-# ===== TAB 10: Share Card =====
-with tabs[9]:
-    if "overall" in st.session_state:
-        img=Image.new("RGB",(900,450),(20,20,20)); d=ImageDraw.Draw(img)
-        d.text((40,40), f"🔥 Attendance: {st.session_state.overall:.2f}%", fill=(255,255,255))
-        buf=io.BytesIO(); img.save(buf, format="PNG")
-        st.download_button("⬇️ Download Share Card", buf.getvalue(), "attendance_card.png", "image/png")
+                new_p = p
+                new_t = t + bunk_here
+                new_pct = round((new_p / new_t) * 100, 2) if new_t else 0
+
+                sim_rows.append([sub, p, t, bunk_here, new_pct])
+
+            sim_df = pd.DataFrame(sim_rows, columns=["Subject", "Present", "Total", "Bunked Tomorrow", "New %"])
+            st.dataframe(sim_df, use_container_width=True)
+
+            overall_new = round(sim_df["New %"].mean(), 2)
+            st.metric("📉 Overall After Bunk", f"{overall_new}%")
+
+            if overall_new < MIN_PERCENT:
+                st.error("🚨 Danger zone! Attendance % low ho jayegi.")
+            else:
+                st.success("😎 Safe hai.")
+
+        st.divider()
+        st.subheader("🎯 Sirf ek subject me bunk")
+
+        sub_sel = st.selectbox("Kaunsa subject bunk karega?", st.session_state.user_subjects)
+        bunk_sub_cnt = st.number_input("Us subject me kitne lecture bunk karega?", 0, 5, 1)
+
+        if st.button("🎯 Simulate Subject Bunk"):
+            sim_rows = []
+            for sub in st.session_state.user_subjects:
+                p, t = attendance.get(sub, (0, 0))
+                bunk_here = bunk_sub_cnt if sub == sub_sel else 0
+
+                new_p = p
+                new_t = t + bunk_here
+                new_pct = round((new_p / new_t) * 100, 2) if new_t else 0
+
+                sim_rows.append([sub, p, t, bunk_here, new_pct])
+
+            sim_df = pd.DataFrame(sim_rows, columns=["Subject", "Present", "Total", "Bunked", "New %"])
+            st.dataframe(sim_df, use_container_width=True)
+
+            overall_new = round(sim_df["New %"].mean(), 2)
+            st.metric("📉 Overall After Subject Bunk", f"{overall_new}%")
+
+            if overall_new < MIN_PERCENT:
+                st.error("🚨 Danger zone!")
+            else:
+                st.success("😎 Safe hai.")
+
+        st.divider()
+        if st.button("🧹 Clear Saved Data"):
+            try:
+                if os.path.exists(AUTO_SAVE_FILE):
+                    os.remove(AUTO_SAVE_FILE)
+                for k in ["user_subjects", "user_lectures", "user_attendance"]:
+                    st.session_state.pop(k, None)
+                st.success("🗑️ Data cleared! Page refresh kar lo.")
+            except Exception as e:
+                st.error(f"❌ Clear failed: {e}")
     else:
-        st.info("Run analysis first.")
+        st.info("⬆️ Pehle subjects aur timetable save karo.")
